@@ -1,0 +1,104 @@
+version: '3.9'
+
+networks:
+  vllm:
+    driver: bridge
+    external: true
+  default:
+    driver: bridge
+
+services:
+  init-model:
+    image: vllm/vllm-openai:v0.6.3
+    entrypoint: "huggingface-cli download instructlab/granite-7b-lab --exclude original/*"
+    volumes:
+      - model-vol:/mnt/model
+    environment:
+      - HF_HOME=/mnt/model
+      - HF_TOKEN=<HF_TOKEN>
+  vllm0:
+    image: vllm/vllm-openai:v0.6.3
+    hostname: vllm0
+    shm_size: '8gb'
+    depends_on:
+      init-model:
+        condition: service_completed_successfully
+    entrypoint: "vllm serve instructlab/granite-7b-lab --host 0.0.0.0 --port 8020 --max-model-len 4096 -tp 2"
+    ports:
+      - "8020:8020"
+    environment:
+      - HF_TOKEN=<HF_TOKEN>
+      - HF_HOME=/mnt/model
+    volumes:
+      - model-vol:/mnt/model
+    healthcheck:
+      test: ["CMD-SHELL", "curl localhost:8020/health"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              device_ids: ["0"]
+              capabilities: ["gpu"]
+    networks:
+      - "vllm"
+      - "default"
+
+  vllm1:
+    image: vllm/vllm-openai:v0.6.3
+    hostname: vllm1
+    depends_on:
+      init-model:
+        condition: service_completed_successfully
+    entrypoint: "vllm serve instructlab/granite-7b-lab --host 0.0.0.0 --port 8021 --max-model-len 4096"
+    ports:
+      - "8021:8021"
+    environment:
+      - HF_TOKEN=<HF_TOKEN>
+      - HF_HOME=/mnt/model
+    volumes:
+      - model-vol:/mnt/model
+    healthcheck:
+      test: ["CMD-SHELL", "curl localhost:8021/health"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              device_ids: ["1"] # need to specify device ids. Else all containers gets put on to the first device ID - 0
+              capabilities: ["gpu"]
+    networks:
+      - "vllm"
+      - "default"
+  haproxy:
+    image: haproxytech/haproxy-ubuntu:latest
+    entrypoint: "/usr/sbin/haproxy -f /etc/haproxy/haproxy.cfg"
+    volumes:
+      - ./ha_proxy_config.cfg:/etc/haproxy/haproxy.cfg:Z
+    depends_on:
+      vllm:
+        condition: service_healthy # Podman compose currently doesn't handle lifecycle conditions
+        # Bug open at https://github.com/containers/podman-compose/issues/866
+    ports:
+      - "8000:8000"
+    networks:
+      - "vllm"
+      - "default"
+
+volumes:
+  model-vol:
+    external: true
